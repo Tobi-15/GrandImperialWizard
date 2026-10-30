@@ -43,8 +43,8 @@ async function serveStatic(req, res) {
     res.end(body);
   } catch (err) {
     if (err.code === 'EISDIR') {
-      // /3d → /3d/, damit relative Pfade im Verzeichnis auflösen
-      res.writeHead(301, { location: `${encodeURI(`/${rel}/`)}${url.search}` }).end();
+      // /3d → /3d/, damit relative Pfade im Verzeichnis auflösen (relativ, funktioniert auch unter einem Unterpfad)
+      res.writeHead(301, { location: `${encodeURI(`${rel.split("/").pop()}/`)}${url.search}` }).end();
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('Nicht gefunden');

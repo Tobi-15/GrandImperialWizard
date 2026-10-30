@@ -66,7 +66,7 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 // ---------- Verbindung ----------
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(`${proto}://${location.host}${new URL("ws", location.href).pathname}`);
   ws.addEventListener('open', () => {
     reconnectDelay = 500;
     $('conn-banner').hidden = true;
