@@ -9,6 +9,7 @@ import { botMove } from './bot.js';
 const ROOM_TTL_MS = 30 * 60 * 1000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // ohne I und O
 const MAX_NAME = 20;
+const MAX_SPECTATORS = 20;
 // Nur Darstellung (3D-Client): Blickrichtung und Emotes werden an die anderen weitergereicht,
 // ohne den Spielzustand zu berühren.
 // sip (Schluck Bier) und puff (Zug an Zigarette/Zigarre) gehören zur Theke.
@@ -64,6 +65,13 @@ export class Rooms {
         case 'join':
           return this.join(conn, msg);
       }
+      const spec = this.spectatorCtx(conn);
+      if (spec) {
+        // Zuschauer dürfen nur gehen; Blick/Emotes aus der 3D-Ansicht werden ignoriert
+        if (msg.type === 'leave') return this.leaveSpectator(spec.room, spec.spectator);
+        if (msg.type === 'look' || msg.type === 'emote') return;
+        throw new GameError('Als Zuschauer kannst du nicht mitspielen.');
+      }
       const { room, player } = this.ctx(conn);
       switch (msg.type) {
         case 'leave':
@@ -111,12 +119,14 @@ export class Rooms {
           clearTimeout(room.botTimer);
           room.game = null;
           room.players = room.players.filter((p) => p.bot || p.conns.size > 0);
+          this.promoteSpectators(room);
           break;
         case 'backToLobby':
           if (player.id !== room.hostId) throw new GameError('Nur der Host kann das.');
           if (room.game && room.game.phase !== 'gameOver') throw new GameError('Das Spiel läuft noch.');
           room.game = null;
           room.players = room.players.filter((p) => p.bot || p.conns.size > 0);
+          this.promoteSpectators(room);
           break;
         default:
           throw new GameError('Unbekannte Aktion.');
@@ -138,7 +148,7 @@ export class Rooms {
   create(conn, { token, name, character }) {
     if (typeof token !== 'string' || token.length < 8) throw new GameError('Ungültiges Token.');
     const code = makeCode(this.rooms);
-    const room = { code, hostId: null, players: [], options: { noEvenBids: false }, game: null, touched: Date.now() };
+    const room = { code, hostId: null, players: [], spectators: [], options: { noEvenBids: false }, game: null, touched: Date.now() };
     this.rooms.set(code, room);
     this.detach(conn);
     const player = this.addPlayer(room, token, cleanName(name));
@@ -153,9 +163,28 @@ export class Rooms {
     const room = this.rooms.get(String(code ?? '').toUpperCase().trim());
     if (!room) throw new GameError('Diesen Raum gibt es nicht (mehr).');
     let player = room.players.find((p) => p.token === token);
+    let spectator = room.spectators.find((s) => s.token === token);
+    if (!player && spectator && !room.game && room.players.length < MAX_PLAYERS) {
+      // Zuschauer rückt an den Tisch, sobald keine Partie mehr läuft
+      room.spectators = room.spectators.filter((s) => s !== spectator);
+      for (const c of spectator.conns) c.ctx = null;
+      spectator = null;
+    }
+    if (!player && (spectator || room.game || room.players.length >= MAX_PLAYERS)) {
+      // Laufende Partie oder voller Tisch: zuschauen statt abweisen
+      if (!spectator) {
+        if (room.spectators.length >= MAX_SPECTATORS) throw new GameError('Der Raum ist voll – auch zum Zuschauen.');
+        spectator = { id: randomBytes(6).toString('hex'), token, name: cleanName(name), conns: new Set() };
+        room.spectators.push(spectator);
+      }
+      this.detach(conn);
+      conn.ctx = { code: room.code, spectatorId: spectator.id };
+      spectator.conns.add(conn);
+      room.touched = Date.now();
+      this.broadcast(room, { bots: false });
+      return;
+    }
     if (!player) {
-      if (room.game) throw new GameError('Das Spiel läuft schon – neue Spieler können nicht mehr beitreten.');
-      if (room.players.length >= MAX_PLAYERS) throw new GameError(`Der Raum ist voll (max. ${MAX_PLAYERS}).`);
       player = this.addPlayer(room, token, cleanName(name));
       this.wishCharacter(room, player, character);
     } else if (!room.game && name) {
@@ -210,6 +239,8 @@ export class Rooms {
     conn.ctx = null;
     if (!room) return;
     for (const p of room.players) p.conns.delete(conn);
+    for (const s of room.spectators) s.conns.delete(conn);
+    setTimeout(() => this.pruneSpectators(room), 15 * 1000).unref();
     room.touched = Date.now();
     if (!room.game) {
       // In der Lobby verschwinden getrennte Spieler nach kurzer Zeit (Reload-Puffer)
@@ -249,11 +280,63 @@ export class Rooms {
     }
     if (!room.players.some(human)) {
       clearTimeout(room.botTimer);
+      this.closeForSpectators(room);
       this.rooms.delete(room.code);
       return;
     }
     if (room.hostId === player.id) room.hostId = room.players.find(human).id;
     this.broadcast(room);
+  }
+
+  // ---------- Zuschauer ----------
+
+  spectatorCtx(conn) {
+    if (!conn.ctx?.spectatorId) return null;
+    const room = this.rooms.get(conn.ctx.code);
+    const spectator = room?.spectators.find((s) => s.id === conn.ctx.spectatorId);
+    if (!room || !spectator) throw new GameError('Du bist in keinem Raum.');
+    return { room, spectator };
+  }
+
+  leaveSpectator(room, spectator) {
+    for (const c of spectator.conns) {
+      c.ctx = null;
+      c.send({ type: 'left' });
+    }
+    room.spectators = room.spectators.filter((s) => s !== spectator);
+    this.broadcast(room, { bots: false });
+  }
+
+  pruneSpectators(room) {
+    if (!this.rooms.has(room.code)) return;
+    const before = room.spectators.length;
+    room.spectators = room.spectators.filter((s) => s.conns.size > 0);
+    if (room.spectators.length !== before) this.broadcast(room, { bots: false });
+  }
+
+  /** Nach einer Partie: verbundene Zuschauer bekommen freie Plätze am Tisch. */
+  promoteSpectators(room) {
+    for (const s of [...room.spectators]) {
+      if (room.players.length >= MAX_PLAYERS) break;
+      if (!s.conns.size) continue;
+      const p = this.addPlayer(room, s.token, s.name);
+      for (const c of s.conns) {
+        c.ctx = { code: room.code, playerId: p.id };
+        p.conns.add(c);
+      }
+      room.spectators = room.spectators.filter((x) => x !== s);
+    }
+  }
+
+  closeForSpectators(room) {
+    for (const s of room.spectators) {
+      for (const c of s.conns) {
+        c.ctx = null;
+        c.send({ type: 'error', message: 'Der Raum wurde geschlossen.' });
+        c.send({ type: 'left' });
+      }
+    }
+    room.spectators = [];
   }
 
   /** Figur wählen (null = automatisch). Geht nicht während einer laufenden Partie. */
@@ -442,6 +525,7 @@ export class Rooms {
       if (p === from) continue;
       for (const c of p.conns) c.send(msg);
     }
+    if (msg.type === 'emote') for (const s of room.spectators) for (const c of s.conns) c.send(msg);
   }
 
   broadcast(room, { bots = true } = {}) {
@@ -454,18 +538,38 @@ export class Rooms {
       players: room.players.map((p) => ({
         id: p.id, name: p.name, online: p.bot || p.conns.size > 0, character: p.character, vice: viceView(p.vice), ...(p.bot && { bot: true }),
       })),
+      spectators: room.spectators.filter((s) => s.conns.size > 0).map((s) => ({ id: s.id, name: s.name })),
     };
     for (const p of room.players) {
       const state = { type: 'state', me: p.id, room: lobby, game: room.game ? room.game.viewFor(p.id) : null };
       for (const c of p.conns) c.send(state);
     }
+    if (room.spectators.length) {
+      // Zuschauer sehen keine Hand (viewFor mit unbekannter Id verbirgt alle Karten)
+      const game = room.game ? room.game.viewFor(null) : null;
+      for (const s of room.spectators) {
+        const state = { type: 'state', me: s.id, spectator: true, room: lobby, game };
+        for (const c of s.conns) c.send(state);
+      }
+    }
     if (bots) this.scheduleBots(room);
+  }
+
+  stats() {
+    let players = 0;
+    let playing = 0;
+    for (const room of this.rooms.values()) {
+      players += room.players.filter((p) => !p.bot && p.conns.size > 0).length;
+      players += room.spectators.filter((sp) => sp.conns.size > 0).length;
+      if (room.game && room.game.phase !== 'gameOver') playing++;
+    }
+    return { rooms: this.rooms.size, playing, players };
   }
 
   sweep() {
     const now = Date.now();
     for (const [code, room] of this.rooms) {
-      const online = room.players.some((p) => p.conns.size > 0);
+      const online = room.players.some((p) => p.conns.size > 0) || room.spectators.some((s) => s.conns.size > 0);
       if (!online && now - room.touched > ROOM_TTL_MS) {
         clearTimeout(room.trickTimer);
         clearTimeout(room.botTimer);

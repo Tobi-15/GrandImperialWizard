@@ -19,10 +19,15 @@ const TYPES = {
   '.glb': 'model/gltf-binary',
 };
 
-async function serveStatic(req, res) {
+async function serveStatic(req, res, rooms) {
   const url = new URL(req.url, 'http://x');
   if (url.pathname === '/healthz') {
     res.writeHead(200, { 'content-type': 'text/plain' }).end('ok');
+    return;
+  }
+  if (url.pathname === '/stats') {
+    // Für die Portalseite: offene Räume und Leute online
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' }).end(JSON.stringify(rooms.stats()));
     return;
   }
   const path = decodeURIComponent(url.pathname);
@@ -54,7 +59,7 @@ async function serveStatic(req, res) {
 export function startServer({ port = 3000, trickDelayMs = 1500 } = {}) {
   const rooms = new Rooms({ trickDelayMs });
   const server = http.createServer((req, res) => {
-    serveStatic(req, res).catch(() => res.writeHead(500).end());
+    serveStatic(req, res, rooms).catch(() => res.writeHead(500).end());
   });
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 16 * 1024 });
 

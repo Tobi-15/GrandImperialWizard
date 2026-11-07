@@ -70,7 +70,7 @@ function connect() {
   ws.addEventListener('open', () => {
     reconnectDelay = 500;
     $('conn-banner').hidden = true;
-    const name = store.get('wizard.name');
+    const name = store.get('wizard.name') ?? store.get('dw.name');
     if (wantedRoom && name) send({ type: 'join', token, name, code: wantedRoom, character: store.get('wizard.character') });
     else render();
   });
@@ -78,6 +78,8 @@ function connect() {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'state') {
       prevGame = state?.game ?? null;
+      if (msg.spectator && !state?.spectator) toast('Die Partie läuft schon – du schaust zu und bist in der nächsten dabei.');
+      if (!msg.spectator && state?.spectator) toast('Du sitzt jetzt mit am Tisch!');
       state = msg;
       wantedRoom = msg.room.code;
       store.set('wizard.room', wantedRoom);
@@ -291,6 +293,7 @@ function renderLobby() {
     ),
   );
   $('btn-addbot').hidden = !isHost || room.players.length >= 6;
+  $('figure-select').closest('.figure-field').style.display = state.spectator ? 'none' : '';
   // Figur für die 3D-Kneipe (die anderen sehen sie dort, auch wenn ich in 2D spiele)
   const idx = room.players.findIndex((p) => p.id === me);
   const mine = room.players[idx]?.character ?? '';
@@ -308,7 +311,9 @@ function renderLobby() {
   $('btn-start').hidden = !isHost;
   $('btn-start').disabled = !enough;
   const hostName = room.players.find((p) => p.id === room.hostId)?.name ?? 'Host';
-  $('lobby-hint').textContent = !enough
+  $('lobby-hint').textContent = state.spectator
+    ? 'Der Tisch ist voll – du schaust zu. Sobald ein Platz frei ist, kannst du neu beitreten.'
+    : !enough
     ? `Es braucht mindestens 3 Spieler – schick den Link an deine Freunde${isHost ? ' oder füge Bots hinzu' : ''}.`
     : isHost
       ? 'Alle da? Dann los!'
@@ -367,9 +372,12 @@ function isOnline(playerId) {
 }
 
 // Richtung eines Platzes vom Tischmittelpunkt aus (ich sitze unten, im Uhrzeigersinn weiter)
+// Zuschauer (mySeat = -1) sehen den Tisch aus Sicht von Platz 0.
+const viewSeat = (g) => (g.mySeat >= 0 ? g.mySeat : 0);
 function seatAngle(g, seat) {
   const n = g.seats.length;
-  const rel = (seat - g.mySeat + n) % n;
+  // Zuschauer: um einen halben Platz gedreht, damit unten Mitte für den Status frei bleibt
+  const rel = ((seat - viewSeat(g) + n) % n) + (g.mySeat < 0 ? 0.5 : 0);
   return ((90 + (rel * 360) / n) * Math.PI) / 180;
 }
 function hash(str) {
@@ -393,6 +401,7 @@ function sortHand(hand, trump) {
 function renderGame() {
   const g = state.game;
   const me = g.mySeat;
+  const spectator = me === -1;
   const myTurn = g.turn === me && g.turn != null;
   const isHost = state.room.hostId === state.me;
   const n = g.seats.length;
@@ -417,8 +426,8 @@ function renderGame() {
 
   // Plätze rund um den Tisch
   const seats = [];
-  for (let rel = 1; rel < n; rel++) {
-    const i = (me + rel) % n;
+  for (let rel = spectator ? 0 : 1; rel < n; rel++) {
+    const i = (viewSeat(g) + rel) % n;
     const a = seatAngle(g, i);
     seats.push(seatEl(g, i, 50 + Math.cos(a) * 46, 50 + Math.sin(a) * 43, crowns));
   }
@@ -455,7 +464,16 @@ function renderGame() {
   // Aktionen
   $('g-actions').replaceChildren(...actionEls(g, isHost));
 
-  // Meine Infos
+  // Meine Infos (Zuschauer: Hinweis statt eigener Werte)
+  const watchers = state.room.spectators ?? [];
+  const watchChip = watchers.length > 0 && h('span', { class: 'stat-chip', title: watchers.map((w) => w.name).join(', ') }, `👀 ${watchers.length} ${watchers.length === 1 ? 'Zuschauer' : 'Zuschauer'}`);
+  if (spectator) {
+    $('g-me').replaceChildren(h('span', { class: 'nm' }, '👀 Du schaust zu'), h('span', { class: 'muted small' }, 'In der nächsten Partie bist du dabei.'), watchChip || '');
+    renderHand(g, false);
+    if ($('dlg-scores').open) renderScores();
+    if ($('dlg-last').open) renderLastTrick();
+    return;
+  }
   const mine = g.seats[me];
   const myStat = mine.bid == null ? '' : mine.tricks === mine.bid ? ' hit' : mine.tricks > mine.bid ? ' over' : '';
   $('g-me').replaceChildren(...[
@@ -465,6 +483,7 @@ function renderGame() {
     h('span', { class: 'stat-chip' }, 'Ansage ', h('b', {}, mine.bid ?? '–')),
     h('span', { class: `stat-chip${myStat}` }, 'Stiche ', h('b', {}, mine.tricks)),
     h('span', { class: 'stat-chip' }, 'Punkte ', h('b', {}, mine.total)),
+    watchChip,
   ].filter(Boolean));
 
   renderHand(g, myTurn);
@@ -617,7 +636,9 @@ function actionEls(g, isHost) {
       return [h('div', { class: 'action-box' },
         h('h3', {}, `Ergebnis Runde ${g.round}`),
         table,
-        h('button', { class: 'btn primary', onclick: () => send({ type: 'nextRound' }) }, `Weiter zu Runde ${g.round + 1}`))];
+        me === -1
+          ? h('div', { class: 'muted small' }, 'Gleich geht es weiter …')
+          : h('button', { class: 'btn primary', onclick: () => send({ type: 'nextRound' }) }, `Weiter zu Runde ${g.round + 1}`))];
     }
 
     const ranking = g.seats.map((s, i) => ({ ...s, i })).sort((a, b) => b.total - a.total);
@@ -687,10 +708,11 @@ function requireName() {
     return null;
   }
   store.set('wizard.name', name);
+  store.set('dw.name', name); // gemeinsamer Name für alle Spiele auf dieser Seite
   return name;
 }
 
-$('name-input').value = store.get('wizard.name') ?? '';
+$('name-input').value = store.get('wizard.name') ?? store.get('dw.name') ?? '';
 $('btn-create').addEventListener('click', () => {
   const name = requireName();
   if (name) send({ type: 'create', token, name, character: store.get('wizard.character') });
@@ -752,7 +774,9 @@ function openQuit() {
   const running = state.game && state.game.phase !== 'gameOver';
   const others = state.room.players.filter((p) => p.id !== state.me && !p.bot).length;
   $('btn-abort').hidden = !isHost || !running;
-  $('quit-hint').textContent = !running
+  $('quit-hint').textContent = state.spectator
+    ? 'Du hörst auf zuzuschauen.'
+    : !running
     ? 'Du verlässt den Tisch.'
     : others
       ? 'Wenn du den Tisch verlässt, übernimmt ein Bot deinen Platz und die anderen spielen weiter.'

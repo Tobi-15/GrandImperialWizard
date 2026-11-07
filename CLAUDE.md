@@ -53,6 +53,10 @@ Das Kartenspiel Wizard (3–6 Spieler) als Browser-Spiel. Tobi spielt es mit Fre
 - **Beenden** (Knopf „Beenden“ im Spiel, 2D und 3D): `abortGame` (nur Host) bricht die laufende Partie ab, alle landen in der Lobby. `leave` geht jederzeit: Während einer Partie übernimmt ein Bot den Platz (neues Token, der alte Browser kommt nicht zurück), ist kein Mensch mehr da, wird der Raum gelöscht. Vorher konnte man eine laufende Partie nicht verlassen und landete beim Neuladen immer wieder darin.
 - **Bots** (zum Allein-Testen, Knopf „🤖 Bot hinzufügen“ in der Lobby, nur Host, × entfernt sie wieder): Server-Spieler mit `bot: true` ohne Verbindung. `scheduleBots` (am Ende von `broadcast`) lässt den Bot am Zug nach `botDelayMs` (~1,1 s) ziehen. Bots gelten als online, werden nie Host und beim Aufräumen der Lobby nicht entfernt; geht der letzte Mensch, wird der Raum gelöscht. Sie bestellen zum Start und nach Runden manchmal Bier/Zigarette und zünden verdiente Zigarren an. `nextRound` drückt immer ein Mensch.
 
+- **Zuschauer:** Wer einem Raum mit laufender Partie (oder vollem Tisch) beitritt, wird Zuschauer statt abgewiesen (`room.spectators`, gleiches `join` mit Token). Zuschauer bekommen `state` mit `spectator: true` und `game = viewFor(null)` (`mySeat = -1`, keine Hand) und dürfen nur `leave`. Nach `abortGame`/`backToLobby` rücken verbundene Zuschauer automatisch an freie Plätze (`promoteSpectators`). Der 2D-Client zeigt dann alle Plätze rund um den Tisch (um einen halben Platz gedreht), der 3D-Client leitet Zuschauer auf die 2D-Ansicht um. `room.spectators` steht auch im `state` (Liste `{id, name}`).
+- **`GET /stats`** liefert `{rooms, playing, players}` für die Portalseite (Betrieb unter games.diewesten.duckdns.org/wizard/).
+- **Gemeinsamer Name:** Beide Clients lesen zusätzlich `localStorage['dw.name']` (den teilen sich alle Spiele der Portalseite) und schreiben ihn beim Beitreten mit.
+
 Der Server ist die einzige Wahrheit. Spielzustand liegt **nur im Arbeitsspeicher**.
 
 ## Befehle
@@ -60,7 +64,7 @@ Der Server ist die einzige Wahrheit. Spielzustand liegt **nur im Arbeitsspeicher
 ```bash
 npm install
 npm start                        # http://localhost:3000 (PORT, TRICK_DELAY_MS einstellbar)
-npm test                         # Regeltests
+npm test                         # Regel- und Raumtests (inkl. Zuschauer)
 node scripts/bots.js 6 --even    # 6 Bots, mit noEvenBids
 URL=wss://wizard-zryw.onrender.com/ws TIMEOUT_MS=240000 node scripts/bots.js 6   # gegen Live-Server (6 Spieler: wenige Stiche, passt ins Zeitlimit)
 ```

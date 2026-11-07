@@ -95,13 +95,18 @@ function connect() {
   ws.addEventListener('open', () => {
     reconnectDelay = 500;
     $('conn-banner').hidden = true;
-    const name = store.get('wizard.name');
+    const name = store.get('wizard.name') ?? store.get('dw.name');
     if (wantedRoom && name) send({ type: 'join', token, name, code: wantedRoom, character: store.get('wizard.character') });
     else render();
   });
   ws.addEventListener('message', (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'state') {
+      if (msg.spectator) {
+        // Zuschauen gibt es nur in der 2D-Ansicht (die Kneipe braucht einen eigenen Platz)
+        location.replace(`../?room=${msg.room.code}`);
+        return;
+      }
       prevGame = state?.game ?? null;
       const first = !state;
       wantedRoom = msg.room.code;
@@ -1111,10 +1116,11 @@ function requireName() {
     return null;
   }
   store.set('wizard.name', name);
+  store.set('dw.name', name); // gemeinsamer Name für alle Spiele auf dieser Seite
   return name;
 }
 
-$('name-input').value = store.get('wizard.name') ?? '';
+$('name-input').value = store.get('wizard.name') ?? store.get('dw.name') ?? '';
 $('btn-create').addEventListener('click', () => {
   const name = requireName();
   if (name) send({ type: 'create', token, name, character: store.get('wizard.character') });

@@ -230,7 +230,10 @@ test('Allein gegen zwei Bots: ein ganzes Spiel läuft durch', async () => {
   rooms.handle(a, { type: 'addBot' });
   rooms.handle(a, { type: 'setOption', key: 'noEvenBids', value: true });
   rooms.handle(a, { type: 'start' });
-  const g = await finished;
+  // Die Bot-Timer sind unref'd (der Server soll beim Beenden nicht hängen). Ohne laufenden
+  // Server würde der Testprozess deshalb vor dem Spielende aussteigen – also wachhalten.
+  const keepAlive = setInterval(() => {}, 1000);
+  const g = await finished.finally(() => clearInterval(keepAlive));
   assert.equal(g.history.length, 20);
   assert.ok(!a.out.some((m) => m.type === 'error'), a.out.filter((m) => m.type === 'error').map((m) => m.message).join());
   rooms.close();
@@ -245,9 +248,11 @@ test('Verlassen während der Partie: ein Bot übernimmt; Host kann abbrechen', (
   const players = a.last('state').room.players;
   assert.equal(players.length, 3);
   assert.ok(players[1].bot && players[1].online, 'Ben ist jetzt ein Bot');
-  // Ben kommt mit altem Token nicht zurück (Spiel läuft, Platz gehört dem Bot)
+  // Ben kommt mit altem Token nicht an den Platz zurück (der gehört jetzt dem Bot), darf aber zuschauen
   rooms.handle(b, { type: 'join', token: 'token-b-123', name: 'Ben', code: players.length && a.last('state').room.code });
-  assert.match(b.last('error').message, /Spiel läuft schon/);
+  assert.equal(b.last('state').spectator, true);
+  assert.equal(b.last('state').game.mySeat, -1);
+  rooms.handle(b, { type: 'leave' });
   rooms.handle(c, { type: 'abortGame' });
   assert.equal(c.last('error').message, 'Nur der Host kann das Spiel abbrechen.');
   rooms.handle(a, { type: 'abortGame' });
@@ -270,5 +275,63 @@ test('Allein mit Bots: Verlassen mitten im Spiel löscht den Raum', () => {
   rooms.handle(a, { type: 'leave' });
   assert.equal(a.last('left').type, 'left');
   assert.equal(rooms.rooms.size, 0);
+  rooms.close();
+});
+
+test('Zuschauer: Beitritt während der Partie, keine Karten, keine Aktionen, danach am Tisch', () => {
+  const rooms = new Rooms({ botDelayMs: 60000 });
+  const { a, b, c } = table(rooms);
+  const code = [...rooms.rooms.keys()][0];
+  rooms.handle(a, { type: 'start' });
+  const d = conn();
+  rooms.handle(d, { type: 'join', token: 'token-d-123', name: 'Dora', code });
+  const ds = d.last('state');
+  assert.equal(ds.spectator, true, 'wird Zuschauer statt abgewiesen');
+  assert.equal(ds.game.mySeat, -1);
+  assert.deepEqual(ds.game.hand, []);
+  assert.equal(ds.game.seats.length, 3);
+  assert.deepEqual(a.last('state').room.spectators.map((s) => s.name), ['Dora']);
+  // Zuschauer darf nicht mitspielen
+  rooms.handle(d, { type: 'bid', value: 0 });
+  rooms.handle(d, { type: 'start' });
+  assert.equal(d.out.filter((m) => m.type === 'error' && /Zuschauer/.test(m.message)).length, 2);
+  // Neu laden: mit demselben Token wieder Zuschauer
+  const d2 = conn();
+  rooms.handle(d2, { type: 'join', token: 'token-d-123', name: 'Dora', code });
+  assert.equal(d2.last('state').spectator, true);
+  // Host bricht ab: Zuschauer rückt an den Tisch
+  rooms.handle(a, { type: 'abortGame' });
+  const after = d2.last('state');
+  assert.equal(after.spectator, undefined);
+  assert.equal(after.room.players.length, 4);
+  assert.ok(after.room.players.some((p) => p.name === 'Dora' && p.id === after.me));
+  assert.deepEqual(after.room.spectators, []);
+  // Jetzt ist Dora normale Spielerin und darf z. B. die Figur wählen
+  rooms.handle(d2, { type: 'setCharacter', character: 'wizard' });
+  assert.ok(!d2.out.some((m) => m.type === 'error' && /Figur/.test(m.message)));
+  void b; void c;
+  rooms.close();
+});
+
+test('Zuschauer kann gehen; schließt der Raum, erfährt er es', () => {
+  const rooms = new Rooms({ botDelayMs: 60000 });
+  const a = conn();
+  rooms.handle(a, { type: 'create', token: 'token-a-123', name: 'Anna' });
+  rooms.handle(a, { type: 'addBot' });
+  rooms.handle(a, { type: 'addBot' });
+  const code = a.last('state').room.code;
+  rooms.handle(a, { type: 'start' });
+  const d = conn();
+  rooms.handle(d, { type: 'join', token: 'token-d-123', name: 'Dora', code });
+  rooms.handle(d, { type: 'leave' });
+  assert.equal(d.last('left').type, 'left');
+  assert.deepEqual(a.last('state').room.spectators, []);
+  const e = conn();
+  rooms.handle(e, { type: 'join', token: 'token-e-123', name: 'Emil', code });
+  rooms.handle(a, { type: 'leave' }); // letzter Mensch am Tisch geht
+  assert.equal(rooms.rooms.size, 0);
+  assert.equal(e.last('left').type, 'left');
+  assert.match(e.last('error').message, /geschlossen/);
+  assert.deepEqual(rooms.stats(), { rooms: 0, playing: 0, players: 0 });
   rooms.close();
 });
