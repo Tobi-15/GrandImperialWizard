@@ -515,3 +515,6 @@ p.to-3d a { color: #3d2a86; font-weight: 700; }
 /* Beenden-Dialog */
 .quit-options { display: grid; gap: 10px; padding-top: 6px; }
 .quit-options p { margin: 0; }
+
+/* Allein gegen Bots */
+.solo-btn { margin-top: 0.5rem; }

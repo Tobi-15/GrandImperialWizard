@@ -102,6 +102,13 @@ function connect() {
   ws.addEventListener('message', (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'state') {
+      // Allein spielen: sobald der eigene Raum steht, zwei Bots dazu und los
+      if (soloPending && !msg.game && msg.room.players.length === 1 && msg.room.hostId === msg.me) {
+        soloPending = false;
+        send({ type: 'addBot' });
+        send({ type: 'addBot' });
+        send({ type: 'start' });
+      }
       if (msg.spectator) {
         // Zuschauen gibt es nur in der 2D-Ansicht (die Kneipe braucht einen eigenen Platz)
         location.replace(`../?room=${msg.room.code}`);
@@ -1121,6 +1128,13 @@ function requireName() {
 }
 
 $('name-input').value = store.get('wizard.name') ?? store.get('dw.name') ?? '';
+let soloPending = false;
+$('btn-solo').addEventListener('click', () => {
+  const name = requireName();
+  if (!name) return;
+  soloPending = true;
+  send({ type: 'create', token, name, character: store.get('wizard.character') });
+});
 $('btn-create').addEventListener('click', () => {
   const name = requireName();
   if (name) send({ type: 'create', token, name, character: store.get('wizard.character') });
